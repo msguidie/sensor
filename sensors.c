@@ -11,7 +11,8 @@
   ⚠️ 未经硬件验证。robot_config.h 的端口宏填完之前无法编译。
      全部阈值来自 sensor_cal.h，实测前均为占位值。
 
-  借用来源逐条标在函数上方的 /* SRC: */ 行，汇总见 SOURCES.md。
+  借用来源逐条标在函数上方的 "SRC:" 注释行里，汇总见 SOURCES.md。
+  （注意：C 的块注释不能嵌套，这里不能写出完整的注释定界符。）
 ==============================================================================*/
 
 #include "robot_config.h"
@@ -384,19 +385,38 @@ bool sensBallHeld(void)      { return sSwState[SW_BALL_PRESENT]; }
 /* SRC: penghengx / ntzeho / Davidlequnchen 的 read_orientation()（三者逐字相同，
         且与 2018 年课程范例一致）—— 采纳其"4 位低有效"结论，
         但改为结构解码 + 保持上次有效值 */
+/* 结构解码，不查表：
+     mask 的 bit0..bit3 = N/E/S/W（由 robot_config.h 的 PORT_COMPASS_* 决定哪根
+     线是哪一位，M7 只需确认这一件事），已在 compassBit() 里统一成 1 = 该方向有效。
+       恰好一位为 1        → 该正方向          heading = bit * 90
+       恰好两位且环上相邻   → 两者之间的斜方向   heading = 低位 * 90 + 45
+       其余（0 位 / 对角两位 / 3-4 位）→ 非法编码
+   环上相邻包含 (W,N) 这一对，即 bit3 与 bit0 —— 它对应 NW。
+   往届各组的查表互不相同（取决于接线顺序），但这个结构在 5 个仓库里一致；
+   把往届编码按 N..NW 排开是一个循环 4 位格雷码，正是上述结构的佐证。 */
 static int compassDecodeDeg(int mask)
 {
-	switch (mask) {
-		case 1:  return HEADING_N;
-		case 3:  return HEADING_NE;
-		case 2:  return HEADING_E;
-		case 6:  return HEADING_SE;
-		case 4:  return HEADING_S;
-		case 12: return HEADING_SW;
-		case 8:  return HEADING_W;
-		case 9:  return HEADING_NW;
-		default: return SENS_NO_HEADING;
+	int i, bits, lo, hi;
+
+	bits = 0;
+	lo   = -1;
+	hi   = -1;
+	for (i = 0; i < 4; i++) {
+		if ((mask & (1 << i)) != 0) {
+			bits++;
+			if (lo < 0)      lo = i;
+			else if (hi < 0) hi = i;
+		}
 	}
+
+	if (bits == 1) return lo * 90;                       /* N / E / S / W */
+
+	if (bits == 2) {
+		if (hi == lo + 1)          return lo * 90 + 45;  /* NE / SE / SW  */
+		if (lo == 0 && hi == 3)    return HEADING_NW;    /* 环绕的那一对   */
+	}
+
+	return SENS_NO_HEADING;
 }
 
 static int compassBit(tSensors port)
