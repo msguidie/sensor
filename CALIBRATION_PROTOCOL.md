@@ -15,7 +15,7 @@
 | **那颗网球** | 关键，见 M2 |
 | 一块平板（书本/纸板） | 做对照，见 M2 |
 | 赛场的黄色反光胶带（或器材单给的黑卡纸） | 见 M5 |
-| 一个限位开关（当采样触发按钮） | 接 `CAL_TRIGGER_PORT` |
+| 一个限位开关（当采样触发按钮） | 接 `cal_harness.c` 里 `TRIGGER_SENSOR` 指定的口（默认 `D12`） |
 
 **上机前先做**：
 1. 填 `robot_config.h` 顶部的端口 TODO 块
@@ -32,7 +32,7 @@
 2. 看 dashboard 连续读数 30 秒
 
 **记录**：每个 Sharp 的静息读数、抖动范围、最大观测值
-**回填**：`CAL_ADC_MAX`、`CAL_SHARP_IDLE[]`
+**回填**（`sensor_cal.h`）：`CAL_ADC_MAX`、`CAL_SHARP_IDLE_RAW`
 
 ---
 
@@ -52,12 +52,17 @@
 
 **同时做平板对照**：至少在 10、20、40、60 cm 四个点各测一次平板，记下平板与网球的读数差。
 
-**回填**：
-- `CAL_SHARP_A`、`CAL_SHARP_B` —— Sharp 的特性是 `1/V` 与距离近似线性，即
-  `distance_cm = (K / raw - B) / A`
-  用 15–80 cm 段的数据做最小二乘拟合求 A、B（3–12 cm 段不要放进拟合，那是折返区）
-- `CAL_SHARP_FOLDBACK_RAW` —— 读数峰值对应的原始值。**大于这个值就说明进了折返区，距离读数不可信**
-- `CAL_SHARP_MAX_USABLE_CM` —— 标准差开始明显变大的那个距离，就是实际可用量程上限（多半远小于标称 80 cm）
+**回填**（`sensor_cal.h`）：
+- `CAL_SHARP_LONG_K` / `CAL_SHARP_LONG_C`（10–80cm 型号）与 `CAL_SHARP_SHORT_K` / `CAL_SHARP_SHORT_C`（4–30cm 型号）
+  —— 代码用的是双曲反演 `distance_mm = 10 * K / (raw + C)`。Sharp 的特性是 `1/V` 与距离近似线性，
+  所以把 `1/距离` 对 `raw` 做最小二乘拟合即可解出 K、C。
+  **只用 15–80 cm 段的数据拟合**（3–12 cm 段是折返区，放进去会把曲线带偏）。
+  > 三个长距传感器**要分别拟合**。现在三个共用一组 `CAL_SHARP_LONG_*` 是简化，
+  > 实测后若个体差异明显，应把它拆成三组常数并相应改 `rawToMm()`。
+- `CAL_SHARP_LONG_FOLDBACK_RAW` —— 读数峰值对应的原始值。**大于这个值就说明进了折返区，距离读数不可信**
+- `CAL_SHARP_LONG_MIN_MM` / `CAL_SHARP_LONG_MAX_MM`、`CAL_SHARP_SHORT_MIN_MM` / `CAL_SHARP_SHORT_MAX_MM`
+  —— 上限取标准差开始明显变大的那个距离，就是实际可用量程上限（多半远小于标称 80 cm）
+- 顺带确认滤波参数 `CAL_FILTER_GAIN_LONG` / `CAL_FILTER_GAIN_SHORT` / `CAL_DETECT_CONFIRM_COUNT` 是否合适
 
 ---
 
@@ -73,7 +78,7 @@
 
 `半锥角 = atan(最大横向偏移 / 距离)`
 
-**回填**：`CAL_SHARP_HALF_CONE_DEG`
+**回填**（`sensor_cal.h`）：`CAL_SHARP_HALF_CONE_DEG`
 **下游用途**：搜索扫描步进角应 **≤ 2 × 半锥角**，否则两次扫描之间会有盲区。
 
 ---
@@ -86,9 +91,12 @@
 2. 放一个高于球的物体（书本立起来，模拟对手车身）在同样距离 → 记录两个读数
 3. 球和高物体同时在场 → 记录
 
-**回填**：
-- `CAL_UPPER_PRESENT_RAW` —— 上方传感器判定"有高物体"的阈值
-- `CAL_BALL_ROBOT_MARGIN` —— 下读数比上读数高出多少才判定"球在对手前方"
+**回填**（`sensor_cal.h`，注意代码里全部是**标定后的 mm**，不是原始 ADC 值）：
+- `CAL_UPPER_PRESENT_MM` —— 上方传感器判定"有高物体"的最远距离，超过就算上方没东西
+- `CAL_OPPONENT_DIFF_MM` —— 上下两读数之差小于此值即判为同一个高物体（对手）；大于则是"球在对手前方"
+- `CAL_BALL_DETECT_MAX_MM` —— 认定"看见球"的最远距离
+- `CAL_BALL_GRAB_MM` —— 短距传感器判定球已进入铲子可动作范围的距离
+- `CAL_HYSTERESIS_MM` —— 迟滞量，释放距离 = 检测距离 + 此值
 
 > 往届 `josephinemonica` 用的是 `SensorValue[B] > SensorValue[C] + 300`，300 是他们的 margin。**这个数不要直接抄，必须自己测**。
 
@@ -109,7 +117,9 @@
 
 同时记录：**离地高度**。IR 循线模块对安装高度极敏感，高了低了都失效。
 
-**回填**：`CAL_LINE_ON_VALUE`（0 或 1）、`CAL_LINE_HEIGHT_MM`、若为模拟则 `CAL_LINE_THRESHOLD`
+**回填**（`sensor_cal.h`）：`CAL_LINE_DIGITAL_MODE`（1=数字 / 0=模拟）、`CAL_LINE_ON_LEVEL`（0 或 1）、
+`CAL_LINE_CONFIRM_COUNT`、`CAL_LINE_HEIGHT_MM`（仅作记录）；
+若为模拟模式，还要逐个回填 `CAL_LINE_THRESH_FL` / `_FR` / `_RL` / `_RR`（**四个各测各的，不要共用一个阈值**）
 
 ---
 
@@ -119,9 +129,12 @@
 
 对每个：按下 → 记读数；松开 → 记读数。取中点作阈值。
 
-**回填**：`CAL_SWITCH_PRESSED_ANALOG`（预期按下接近 0 或接近满量程，实测确认方向）
+**回填**（`sensor_cal.h`）：`CAL_SWITCH_ANALOG_PRESSED_MAX`（低于此值 = 按下；预期松开时接近满量程、按下时拉到 0，实测确认方向）、`CAL_SWITCH_CONFIRM_COUNT`
 
-数字口上的开关直接读 0/1，记录**哪个值代表按下**（`sensorTouch` 与 `sensorDigitalIn` 极性可能相反）。
+数字口上的开关直接读 0/1，记录**哪个值代表按下**（`sensorTouch` 与 `sensorDigitalIn` 极性可能相反）
+→ 回填 `CAL_SWITCH_DIGITAL_PRESSED_LEVEL`。
+
+同时在 `robot_config.h` 里登记每个开关接的是哪类口：`SW_SCOOP_TOP_ON_ANALOG` 等四个宏（1=analog，0=digital）。
 
 ---
 
@@ -133,7 +146,14 @@
 2. 把机器人（或罗盘模块）缓慢转一整圈
 3. 记录 4 个引脚在 8 个方位上的 0/1 组合
 
-**回填**：`CAL_COMPASS_CODE[8]` —— 8 个方位对应的 4 位整数编码
+**回填**：
+- `robot_config.h` 的 `PORT_COMPASS_N` / `_E` / `_S` / `_W` —— **本步真正要确认的就是这个**：
+  哪根线是哪个方向。填对了解码就成立。
+- `sensor_cal.h` 的 `CAL_COMPASS_ACTIVE_LOW`（预期 1）、`CAL_COMPASS_DRIVE_SUPPLY`、`CAL_COMPASS_CONFIRM_COUNT`
+
+> **不需要标定"编码→方位"查表。** `compassDecodeDeg()` 是结构解码，不查表：
+> 恰好一位有效 = 该正方向，环上相邻两位有效 = 两者之间的斜方向。
+> 所以只要四个引脚对应关系填对，与具体接线顺序无关。
 
 > 往届解码式：`code = 8*W + 4*S + 2*E + 1*N`，`josephinemonica` 得到的映射是
 > `14=N, 13=E, 11=S, 7=W, 12=NE, 9=SE, 3=SW, 6=NW`（**引脚为低有效**）。
@@ -147,7 +167,7 @@
 2. 手推机器人沿直线走 **1.00 m**（用卷尺量）
 3. 读脉冲数，重复 3 次取平均
 
-**回填**：`CAL_ENC_TICKS_PER_M`
+**回填**（`sensor_cal.h`）：`CAL_ENC_TICKS_PER_M`；确认轮型后再定 `CAL_ENC_TRUSTWORTHY`（全向轮填 0）
 
 **⚠️ 先确认轮型**：如果是全向轮，横向滚子会让推行时产生打滑，标定值和实际行驶差异较大。若为全向轮，此项标定意义有限，导航应以罗盘为主。
 
